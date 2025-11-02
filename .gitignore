@@ -1,0 +1,104 @@
+# ESP-IDF Build System
+build/
+sdkconfig
+sdkconfig.old
+sdkconfig.defaults
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+*.egg-info/
+dist/
+build/
+
+# IDE - Cursor / VSCode
+.cursor/
+.vscode/
+*.code-workspace
+*.swp
+*.swo
+*~
+
+# IDE - Eclipse
+.project
+.cproject
+.settings/
+
+# IDE - CLion
+.idea/
+cmake-build-*/
+
+# Compiled Object files
+*.slo
+*.lo
+*.o
+*.obj
+
+# Precompiled Headers
+*.gch
+*.pch
+
+# Compiled Dynamic libraries
+*.so
+*.dylib
+*.dll
+
+# Compiled Static libraries
+*.lai
+*.la
+*.a
+*.lib
+
+# Executables
+*.exe
+*.out
+*.app
+
+# Debug files
+*.dSYM/
+*.su
+*.idb
+*.pdb
+
+# ESP-IDF specific
+managed_components/
+dependencies.lock
+.flash_args
+.flash_args.in
+
+# Partition table binaries
+*.bin
+
+# Backup files
+*.bak
+*.backup
+*~
+
+# OS files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
+
+# Log files
+*.log
+*.tmp
+
+# Temporary files
+*.tmp
+*.temp
+
+# Configuration backups
+sdkconfig.backup
+sdkconfig.ci.backup
+
+.DS_Store
