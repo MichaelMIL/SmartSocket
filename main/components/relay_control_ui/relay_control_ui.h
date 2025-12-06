@@ -18,8 +18,8 @@
 extern "C" {
 #endif
 
-// #define RELAY_TIMER_DURATION_SECONDS (30 * 60)  // 30 minutes in seconds
-#define RELAY_TIMER_DURATION_SECONDS (10)  // 10 seconds in seconds
+#define RELAY_TIMER_DURATION_SECONDS (30 * 60)  // 30 minutes in seconds
+// #define RELAY_TIMER_DURATION_SECONDS (10 * 60)  // 10 seconds in seconds
 #define BUTTON_WIDTH_PX 100
 #define BUTTON_HEIGHT_PX 60
 #define BUTTON_OFF_COLOR lv_color_hex(0xC00000)
@@ -34,6 +34,13 @@ extern "C" {
 #define PROGRESS_BAR_HEIGHT_PX 4
 #define PROGRESS_BAR_Y_OFFSET_PX -10
 #define PROGRESS_BAR_X_OFFSET_PX 90
+#define CURRENT_LABEL_HEIGHT_PX 20
+#define CURRENT_LABEL_WIDTH_PX 100
+#define CURRENT_LABEL_X_OFFSET_PX 0
+#define CURRENT_LABEL_Y_OFFSET_PX 50
+#define CURRENT_LABEL_TEXT_COLOR lv_color_hex(0xFFFF00)
+#define CURRENT_LABEL_TEXT_ALIGN LV_TEXT_ALIGN_CENTER
+#define CURRENT_UPDATE_INTERVAL_MS 500  // Update current reading every 500ms
 
 
 /**
@@ -55,8 +62,12 @@ struct relay_control_ui_s {
     lv_obj_t *label;           // The label inside the button
     lv_obj_t *timer_label;     // The timer countdown label
     lv_obj_t *progress_bar;    // The animated progress bar for countdown
+    lv_obj_t *current_container; // Container for current display with arrow
+    lv_obj_t *current_label;   // The current consumption label
     lv_timer_t *lvgl_timer;    // LVGL timer for safe UI updates
+    lv_timer_t *current_timer; // LVGL timer for current reading updates
     bool state;                 // Current relay state (true = ON, false = OFF)
+    bool is_left_side;          // Whether button is on left side (for arrow direction)
     const char *tag;            // Log tag for this instance
     const char *name;           // Display name for this relay (e.g., "Relay 1")
     esp_timer_handle_t timer;   // Timer handle for countdown

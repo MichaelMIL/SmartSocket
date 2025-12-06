@@ -68,6 +68,58 @@ static void format_time_string(uint32_t seconds, char *buffer)
 }
 
 /**
+ * @brief Update the current consumption display
+ * 
+ * @param ui Pointer to the relay control UI object
+ */
+static void update_current_display(relay_control_ui_t *ui)
+{
+    if (ui == NULL || ui->current_label == NULL || ui->current_container == NULL) {
+        return;
+    }
+    
+    // Read current from hardware if available
+    float current = 0.0f;
+    if (ui->hardware != NULL) {
+        current = relay_hardware_read_current(ui->hardware);
+    }
+    
+    // Format current string with arrow pointing to button
+    char current_str[20];
+    if (ui->is_left_side) {
+        // Left buttons: arrow points left (←)
+        snprintf(current_str, sizeof(current_str), "← %.2f A", current);
+    } else {
+        // Right buttons: arrow points right (→)
+        snprintf(current_str, sizeof(current_str), "%.2f A →", current);
+    }
+    lv_label_set_text(ui->current_label, current_str);
+    
+    // Always show current container (even when relay is OFF, it will show 0.00 A)
+    if (ui->current_container != NULL) {
+        lv_obj_clear_flag(ui->current_container, LV_OBJ_FLAG_HIDDEN);
+    }
+    
+    // Change color based on current value for better visibility
+    lv_color_t text_color, bg_color;
+    if (current > 0.1f) {
+        // Current flowing - use bright green text with darker green background
+        text_color = lv_color_hex(0x00FF00);
+        bg_color = lv_color_hex(0x004400);
+    } else {
+        // No current or very low - use gray text with dark background
+        text_color = lv_color_hex(0x808080);
+        bg_color = lv_color_hex(0x202020);
+    }
+    
+    lv_obj_set_style_text_color(ui->current_label, text_color, LV_PART_MAIN);
+    if (ui->current_container != NULL) {
+        lv_obj_set_style_bg_color(ui->current_container, bg_color, LV_PART_MAIN);
+        lv_obj_set_style_border_color(ui->current_container, text_color, LV_PART_MAIN);
+    }
+}
+
+/**
  * @brief Update the timer display
  * 
  * @param ui Pointer to the relay control UI object
@@ -219,6 +271,21 @@ static void lvgl_timer_cb(lv_timer_t *timer)
             update_button_appearance(ui);
         }
     }
+}
+
+/**
+ * @brief LVGL timer callback for current reading updates
+ */
+static void current_timer_cb(lv_timer_t *timer)
+{
+    relay_control_ui_t *ui = (relay_control_ui_t *)lv_timer_get_user_data(timer);
+    
+    if (ui == NULL) {
+        return;
+    }
+    
+    // Update current display (safe to call from LVGL timer context)
+    update_current_display(ui);
 }
 
 /**
@@ -474,6 +541,64 @@ relay_control_ui_t *relay_control_ui_create(lv_obj_t *parent, const char *tag, c
     // Initially hide progress bar
     lv_obj_add_flag(ui->progress_bar, LV_OBJ_FLAG_HIDDEN);
     
+    // Determine if button is on left or right side based on alignment
+    ui->is_left_side = (align == LV_ALIGN_TOP_LEFT || align == LV_ALIGN_LEFT_MID || align == LV_ALIGN_BOTTOM_LEFT);
+    bool is_right_side = (align == LV_ALIGN_TOP_RIGHT || align == LV_ALIGN_RIGHT_MID || align == LV_ALIGN_BOTTOM_RIGHT);
+    
+    // Create container for current display with arrow
+    ui->current_container = lv_obj_create(parent);
+    if (ui->current_container == NULL) {
+        ESP_LOGE(ui->tag, "Failed to create current container");
+        lv_obj_del(ui->progress_bar);
+        lv_obj_del(ui->timer_label);
+        lv_obj_del(ui->button);
+        free(ui);
+        return NULL;
+    }
+    
+    // Style the container to look like an arrow/bubble
+    lv_obj_set_size(ui->current_container, 80, 30);
+    lv_obj_set_style_bg_opa(ui->current_container, LV_OPA_80, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(ui->current_container, lv_color_hex(0x202020), LV_PART_MAIN);
+    lv_obj_set_style_border_width(ui->current_container, 2, LV_PART_MAIN);
+    lv_obj_set_style_border_color(ui->current_container, lv_color_hex(0x808080), LV_PART_MAIN);
+    lv_obj_set_style_radius(ui->current_container, 5, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(ui->current_container, 4, LV_PART_MAIN);
+    
+    // Position container based on button alignment
+    if (ui->is_left_side) {
+        // Left buttons: show container to the right with arrow pointing left
+        lv_obj_align_to(ui->current_container, ui->button, LV_ALIGN_OUT_RIGHT_MID, 0, -15);
+    } else if (is_right_side) {
+        // Right buttons: show container to the left with arrow pointing right
+        lv_obj_align_to(ui->current_container, ui->button, LV_ALIGN_OUT_LEFT_MID, 0, 15);
+    } else {
+        // Center or other: show below (default)
+        lv_obj_align_to(ui->current_container, ui->button, LV_ALIGN_OUT_BOTTOM_MID, CURRENT_LABEL_X_OFFSET_PX, CURRENT_LABEL_Y_OFFSET_PX);
+    }
+    
+    // Create current consumption label inside the container
+    ui->current_label = lv_label_create(ui->current_container);
+    if (ui->current_label == NULL) {
+        ESP_LOGE(ui->tag, "Failed to create current label");
+        lv_obj_del(ui->current_container);
+        lv_obj_del(ui->progress_bar);
+        lv_obj_del(ui->timer_label);
+        lv_obj_del(ui->button);
+        free(ui);
+        return NULL;
+    }
+    
+    lv_obj_center(ui->current_label);
+    lv_label_set_text_static(ui->current_label, "0.00 A");
+    
+    // Style the current label
+    lv_obj_set_style_text_align(ui->current_label, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+    lv_obj_set_style_text_color(ui->current_label, CURRENT_LABEL_TEXT_COLOR, LV_PART_MAIN);
+    
+    // Always show current container (will display 0.00 A when relay is OFF)
+    lv_obj_clear_flag(ui->current_container, LV_OBJ_FLAG_HIDDEN);
+    
     // Initialize timer fields and callbacks
     ui->timer = NULL;
     ui->time_remaining = 0;
@@ -487,6 +612,9 @@ relay_control_ui_t *relay_control_ui_create(lv_obj_t *parent, const char *tag, c
     ui->lvgl_timer = lv_timer_create(lvgl_timer_cb, 100, ui);  // Check every 100ms
     if (ui->lvgl_timer == NULL) {
         ESP_LOGE(ui->tag, "Failed to create LVGL timer");
+        if (ui->current_label != NULL) {
+            lv_obj_del(ui->current_label);
+        }
         if (ui->progress_bar != NULL) {
             lv_obj_del(ui->progress_bar);
         }
@@ -497,8 +625,29 @@ relay_control_ui_t *relay_control_ui_create(lv_obj_t *parent, const char *tag, c
     }
     lv_timer_set_repeat_count(ui->lvgl_timer, -1);  // Repeat indefinitely
     
+    // Create LVGL timer for current reading updates
+    ui->current_timer = lv_timer_create(current_timer_cb, CURRENT_UPDATE_INTERVAL_MS, ui);
+    if (ui->current_timer == NULL) {
+        ESP_LOGE(ui->tag, "Failed to create current timer");
+        lv_timer_del(ui->lvgl_timer);
+        if (ui->current_container != NULL) {
+            lv_obj_del(ui->current_container);
+        }
+        if (ui->progress_bar != NULL) {
+            lv_obj_del(ui->progress_bar);
+        }
+        lv_obj_del(ui->timer_label);
+        lv_obj_del(ui->button);
+        free(ui);
+        return NULL;
+    }
+    lv_timer_set_repeat_count(ui->current_timer, -1);  // Repeat indefinitely
+    
     // Set initial appearance
     update_button_appearance(ui);
+    
+    // Initialize current display
+    update_current_display(ui);
     
     // Add click event callback with user data pointing to our object
     lv_obj_add_event_cb(ui->button, relay_button_cb, LV_EVENT_CLICKED, ui);
@@ -535,8 +684,20 @@ void relay_control_ui_delete(relay_control_ui_t *ui)
         lv_timer_del(ui->lvgl_timer);
         ui->lvgl_timer = NULL;
     }
+    
+    if (ui->current_timer != NULL) {
+        lv_timer_del(ui->current_timer);
+        ui->current_timer = NULL;
+    }
 
     // Delete LVGL objects if they exist
+    // Note: deleting current_container will also delete current_label as it's a child
+    if (ui->current_container != NULL) {
+        lv_obj_del(ui->current_container);
+        ui->current_container = NULL;
+        ui->current_label = NULL;
+    }
+    
     if (ui->progress_bar != NULL) {
         lv_obj_del(ui->progress_bar);
         ui->progress_bar = NULL;
@@ -612,6 +773,9 @@ void relay_control_ui_set_state(relay_control_ui_t *ui, bool state)
     
     update_button_appearance(ui);
     
+    // Update current display when state changes
+    update_current_display(ui);
+    
     // Notify state change callback (for master button updates)
     if (ui->state_change_cb != NULL) {
         ui->state_change_cb(ui, ui->state);
@@ -642,6 +806,9 @@ void relay_control_ui_toggle(relay_control_ui_t *ui)
     }
     
     update_button_appearance(ui);
+    
+    // Update current display when state changes
+    update_current_display(ui);
     
     // Notify state change callback (for master button updates)
     if (ui->state_change_cb != NULL) {
