@@ -21,6 +21,7 @@
 #include "lvgl.h"
 #include "wifi_ota.h"
 #include "nvs_flash.h"
+#include "relay_control_ui.h"
 
 #if CONFIG_EXAMPLE_LCD_CONTROLLER_ILI9341
 #include "esp_lcd_ili9341.h"
@@ -76,6 +77,7 @@ static _lock_t lvgl_api_lock;
 
 extern void example_lvgl_demo_ui(lv_disp_t *disp);
 extern void example_lvgl_update_ip_address(const char *ip_str);
+extern relay_control_ui_t *example_lvgl_get_relay_ui(int index);
 
 static bool example_notify_lvgl_flush_ready(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_io_event_data_t *edata, void *user_ctx)
 {
