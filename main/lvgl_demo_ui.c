@@ -12,6 +12,8 @@
 #include "driver/gpio.h"
 #include "hal/adc_types.h"
 #include "esp_adc/adc_oneshot.h"
+#include <string.h>
+#include <stdio.h>
 
 // Global pointers to relay hardware objects
 static relay_hardware_t *relay_1_hw = NULL;
@@ -29,6 +31,9 @@ static relay_control_ui_t *relay_3_ui_obj = NULL;
 static relay_control_ui_t *relay_4_ui_obj = NULL;
 static relay_control_ui_t *relay_5_ui_obj = NULL;
 static relay_control_ui_t *relay_6_ui_obj = NULL;
+
+// Global pointer to IP address label
+static lv_obj_t *ip_label = NULL;
 
 /**
  * @brief Callback function called when any relay changes state
@@ -99,4 +104,34 @@ void example_lvgl_demo_ui(lv_display_t *disp)
     relay_control_ui_set_state_change_callback(relay_6_ui_obj, relay_state_changed_cb, NULL);
     // Initialize master button appearance
     master_button_ui_update_appearance(master_ui_obj);
+    
+    // Create IP address label at the bottom of the screen
+    ip_label = lv_label_create(scr);
+    lv_label_set_text(ip_label, "IP: --");
+    lv_obj_set_style_text_color(ip_label, lv_color_hex(0x808080), LV_PART_MAIN); // Gray color
+    lv_obj_set_style_text_font(ip_label, &lv_font_montserrat_14, LV_PART_MAIN); // Small font
+    lv_obj_align(ip_label, LV_ALIGN_BOTTOM_MID, 0, -5); // Center at bottom with 5px margin
+    lv_obj_set_style_text_align(ip_label, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+}
+
+/**
+ * @brief Update the IP address label on the screen
+ * 
+ * @param ip_str IP address string (can be NULL to show "IP: --")
+ */
+void example_lvgl_update_ip_address(const char *ip_str)
+{
+    if (ip_label == NULL) {
+        return;
+    }
+    
+    if (ip_str != NULL && strlen(ip_str) > 0) {
+        char label_text[32];
+        snprintf(label_text, sizeof(label_text), "IP: %s", ip_str);
+        lv_label_set_text(ip_label, label_text);
+        lv_obj_set_style_text_color(ip_label, lv_color_hex(0x00FF00), LV_PART_MAIN); // Green when connected
+    } else {
+        lv_label_set_text(ip_label, "IP: --");
+        lv_obj_set_style_text_color(ip_label, lv_color_hex(0x808080), LV_PART_MAIN); // Gray when not connected
+    }
 }
