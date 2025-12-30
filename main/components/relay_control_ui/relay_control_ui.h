@@ -73,6 +73,7 @@ struct relay_control_ui_s {
     esp_timer_handle_t timer;   // Timer handle for countdown
     uint32_t time_remaining;   // Time remaining in seconds
     volatile bool update_needed; // Flag to signal UI update needed (set from timer callback)
+    volatile bool state_update_needed; // Flag to signal state change UI update needed (set from HTTP handler or other non-LVGL contexts)
     bool long_press_active;    // Flag to track if long press just happened (prevents CLICKED event from toggling)
     relay_state_change_cb_t state_change_cb; // Callback when state changes
     void *state_change_cb_arg;  // User data for state change callback

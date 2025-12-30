@@ -187,7 +187,7 @@ static esp_err_t init_relay_gpio(relay_hardware_t *hw)
         return ESP_ERR_INVALID_ARG;
     }
     
-    const char *tag = (hw->tag != NULL) ? hw->tag : DEFAULT_TAG;
+        const char *tag = (hw->tag != NULL) ? hw->tag : DEFAULT_TAG;
     uint64_t pin_mask = 0;
     
     // Configure relay GPIO pin as output
@@ -223,8 +223,8 @@ static esp_err_t init_relay_gpio(relay_hardware_t *hw)
     
     // Initialize relay to OFF state (HIGH for active LOW relay)
     if (hw->gpio_pin >= 0 && hw->gpio_pin != GPIO_NUM_NC) {
-        gpio_set_level(hw->gpio_pin, 1);
-        ESP_LOGI(tag, "Relay GPIO %d initialized as output, set to OFF", hw->gpio_pin);
+    gpio_set_level(hw->gpio_pin, 1);
+    ESP_LOGI(tag, "Relay GPIO %d initialized as output, set to OFF", hw->gpio_pin);
     }
     
     // Initialize LED to OFF state (LOW for active HIGH LED)

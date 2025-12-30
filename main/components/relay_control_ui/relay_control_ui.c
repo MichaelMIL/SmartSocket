@@ -259,17 +259,32 @@ static void lvgl_timer_cb(lv_timer_t *timer)
         return;
     }
     
-    // Check if update is needed (set from esp_timer callback)
+    // Check if update is needed (set from esp_timer callback or start_timer/stop_timer)
     if (ui->update_needed) {
         ui->update_needed = false;  // Clear flag
         
         // Now safe to call LVGL functions since we're in LVGL timer context
         update_timer_display(ui);
         
+        // If timer just started (time_remaining == RELAY_TIMER_DURATION_SECONDS), reset progress bar
+        if (ui->time_remaining == RELAY_TIMER_DURATION_SECONDS && ui->progress_bar != NULL) {
+            lv_bar_set_value(ui->progress_bar, 0, LV_ANIM_OFF);
+            lv_obj_set_style_bg_color(ui->progress_bar, lv_color_hex(0x00FF00), LV_PART_INDICATOR);  // Start green
+        }
+        
         // If timer expired, also update button appearance
         if (ui->time_remaining == 0 && !ui->state) {
             update_button_appearance(ui);
         }
+    }
+    
+    // Check if state change update is needed (set from HTTP handler or other non-LVGL contexts)
+    if (ui->state_update_needed) {
+        ui->state_update_needed = false;  // Clear flag
+        
+        // Now safe to call LVGL functions since we're in LVGL timer context
+        update_button_appearance(ui);
+        update_current_display(ui);
     }
 }
 
@@ -309,11 +324,9 @@ static void start_timer(relay_control_ui_t *ui)
     // Initialize time remaining
     ui->time_remaining = RELAY_TIMER_DURATION_SECONDS;
 
-    // Reset progress bar to 0%
-    if (ui->progress_bar != NULL) {
-        lv_bar_set_value(ui->progress_bar, 0, LV_ANIM_OFF);
-        lv_obj_set_style_bg_color(ui->progress_bar, lv_color_hex(0x00FF00), LV_PART_INDICATOR);  // Start green
-    }
+    // Signal that UI update is needed (will be handled by LVGL timer callback)
+    // DO NOT call LVGL functions directly here - this may be called from HTTP handler
+    ui->update_needed = true;
 
     // Create timer
     const esp_timer_create_args_t timer_args = {
@@ -339,7 +352,6 @@ static void start_timer(relay_control_ui_t *ui)
     }
 
     ESP_LOGI(ui->tag, "Timer started: 30 minutes");
-    update_timer_display(ui);
 }
 
 /**
@@ -360,7 +372,9 @@ static void stop_timer(relay_control_ui_t *ui)
     }
 
     ui->time_remaining = 0;
-    update_timer_display(ui);
+    // Signal that UI update is needed (will be handled by LVGL timer callback)
+    // DO NOT call LVGL functions directly here - this may be called from HTTP handler
+    ui->update_needed = true;
 }
 
 /**
@@ -771,12 +785,12 @@ void relay_control_ui_set_state(relay_control_ui_t *ui, bool state)
         stop_timer(ui);
     }
     
-    update_button_appearance(ui);
-    
-    // Update current display when state changes
-    update_current_display(ui);
+    // Signal that UI update is needed (will be handled by LVGL timer callback)
+    // DO NOT call LVGL functions directly here - this may be called from HTTP handler (CPU 1)
+    ui->state_update_needed = true;
     
     // Notify state change callback (for master button updates)
+    // Note: This callback should also not call LVGL functions directly
     if (ui->state_change_cb != NULL) {
         ui->state_change_cb(ui, ui->state);
     }

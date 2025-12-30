@@ -135,3 +135,22 @@ void example_lvgl_update_ip_address(const char *ip_str)
         lv_obj_set_style_text_color(ip_label, lv_color_hex(0x808080), LV_PART_MAIN); // Gray when not connected
     }
 }
+
+/**
+ * @brief Get relay UI object by index (1-6)
+ * 
+ * @param index Relay index (1-6)
+ * @return relay_control_ui_t* Pointer to relay UI object, or NULL if invalid index
+ */
+relay_control_ui_t *example_lvgl_get_relay_ui(int index)
+{
+    switch (index) {
+        case 1: return relay_1_ui_obj;
+        case 2: return relay_2_ui_obj;
+        case 3: return relay_3_ui_obj;
+        case 4: return relay_4_ui_obj;
+        case 5: return relay_5_ui_obj;
+        case 6: return relay_6_ui_obj;
+        default: return NULL;
+    }
+}
