@@ -19,6 +19,8 @@
 #include "esp_err.h"
 #include "esp_log.h"
 #include "lvgl.h"
+#include "wifi_ota.h"
+#include "nvs_flash.h"
 
 #if CONFIG_EXAMPLE_LCD_CONTROLLER_ILI9341
 #include "esp_lcd_ili9341.h"
@@ -73,6 +75,7 @@ static const char *TAG = "example";
 static _lock_t lvgl_api_lock;
 
 extern void example_lvgl_demo_ui(lv_disp_t *disp);
+extern void example_lvgl_update_ip_address(const char *ip_str);
 
 static bool example_notify_lvgl_flush_ready(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_io_event_data_t *edata, void *user_ctx)
 {
@@ -171,6 +174,45 @@ static void example_lvgl_port_task(void *arg)
 
 void app_main(void)
 {
+    // Initialize NVS (required for WiFi)
+    esp_err_t ret = nvs_flash_init();
+    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        ret = nvs_flash_init();
+    }
+    ESP_ERROR_CHECK(ret);
+
+    // Initialize WiFi and OTA (optional - configure with your WiFi credentials)
+    // Uncomment and configure these lines to enable WiFi/OTA:
+    
+    wifi_ota_config_t wifi_config = {
+        .ssid = "SSID",
+        .password = "PASSWORD",
+        .ota_url = NULL,  // Set to OTA URL if you want automatic updates
+        .ota_host = "smartsocket.local",  // Set to OTA server hostname
+        .ota_port = 80,
+    };
+    if (wifi_ota_init(&wifi_config) == ESP_OK) {
+        ESP_LOGI(TAG, "WiFi connected successfully");
+        char ip_str[16];
+        if (wifi_ota_get_ip(ip_str, sizeof(ip_str)) == ESP_OK) {
+            ESP_LOGI(TAG, "IP address: %s", ip_str);
+            ESP_LOGI(TAG, "Web interface available at: http://%s", ip_str);
+            
+            // Update IP address on screen (must be done after LVGL is initialized)
+            // This will be called after the display is set up
+        }
+        
+        // HTTP server for firmware uploads is automatically started
+        // Access the web interface at http://<IP_ADDRESS> to upload firmware
+        
+        // Example: Start OTA update programmatically (uncomment to use)
+        // wifi_ota_update("http://your-server.com/firmware.bin");
+        // or
+        // wifi_ota_update_from_host("smartsocket.local", "/firmware.bin", 80);
+    }
+    
+
     ESP_LOGI(TAG, "Turn off LCD backlight");
     gpio_config_t bk_gpio_config = {
         .mode = GPIO_MODE_OUTPUT,
@@ -325,5 +367,18 @@ void app_main(void)
     lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, LV_PART_MAIN);
     _lock_acquire(&lvgl_api_lock);
     example_lvgl_demo_ui(display);
+    
+    // Update IP address on screen if WiFi is connected
+    if (wifi_ota_is_connected()) {
+        char ip_str[16];
+        if (wifi_ota_get_ip(ip_str, sizeof(ip_str)) == ESP_OK) {
+            example_lvgl_update_ip_address(ip_str);
+        } else {
+            example_lvgl_update_ip_address(NULL);
+        }
+    } else {
+        example_lvgl_update_ip_address(NULL);
+    }
+    
     _lock_release(&lvgl_api_lock);
 }
