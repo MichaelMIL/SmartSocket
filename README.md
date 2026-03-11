@@ -1,100 +1,92 @@
-| Supported Targets | ESP32 | ESP32-C2 | ESP32-C3 | ESP32-C5 | ESP32-C6 | ESP32-C61 | ESP32-H2 | ESP32-H21 | ESP32-P4 | ESP32-S2 | ESP32-S3 |
-| ----------------- | ----- | -------- | -------- | -------- | -------- | --------- | -------- | --------- | -------- | -------- | -------- |
+## SmartSocket – LVGL Relay Control UI
 
-# SPI LCD and Touch Panel Example
+SmartSocket is an ESP-IDF project that uses LVGL to provide a graphical UI for controlling up to **six relays** and monitoring their state on an SPI LCD. The UI also shows the current IP address of the device so you can easily confirm network connectivity.
 
-[esp_lcd](https://docs.espressif.com/projects/esp-idf/en/latest/esp32/api-reference/peripherals/lcd.html) provides several panel drivers out-of box, e.g. ST7789, SSD1306, NT35510. However, there're a lot of other panels on the market, it's beyond `esp_lcd` component's responsibility to include them all.
+The main LVGL UI is implemented in `main/lvgl_demo_ui.c`, which wires together:
+- **Relay hardware** (`relay_hardware_t` instances, one per relay)
+- **Per‑relay UI controls** (`relay_control_ui_t`)
+- A **master control button UI** (`master_button_ui_t`)
+- An **IP status label** at the bottom of the screen
 
-`esp_lcd` allows user to add their own panel drivers in the project scope (i.e. panel driver can live outside of esp-idf), so that the upper layer code like LVGL porting code can be reused without any modifications, as long as user-implemented panel driver follows the interface defined in the `esp_lcd` component.
+When any relay changes state, the master button can update its appearance to reflect the overall status of all controlled relays, and the IP label can be updated at runtime with `example_lvgl_update_ip_address()`.
 
-This example shows how to use GC9A01 or ILI9341 display driver from Component manager in esp-idf project. These components are using API provided by `esp_lcd` component. This example will draw a fancy dash board with the LVGL library.
+## Features
 
-This example uses the [esp_timer](https://docs.espressif.com/projects/esp-idf/en/latest/esp32/api-reference/system/esp_timer.html) to generate the ticks needed by LVGL and uses a dedicated task to run the `lv_timer_handler()`. Since the LVGL APIs are not thread-safe, this example uses a mutex which be invoked before the call of `lv_timer_handler()` and released after it. The same mutex needs to be used in other tasks and threads around every LVGL (lv_...) related function call and code. For more porting guides, please refer to [LVGL porting doc](https://docs.lvgl.io/master/porting/index.html).
+- **Up to 6 relays** with dedicated UI tiles (`Relay 1` … `Relay 6`)
+- **Hardware abstraction layer** via `relay_hardware_create()` for each relay:
+  - Configurable GPIO for the relay output
+  - Configurable GPIO/ADC channel for current/voltage sense (ADC1/ADC2)
+- **Master control button** (via `master_button_ui_*` APIs) to act on all relays at once
+- **Dynamic IP display**:
+  - Shows `IP: --` when not connected
+  - Shows `IP: <address>` in green when connected
 
-## Touch controller STMPE610
+## Hardware Overview
 
-In this example you can enable touch controller STMPE610 connected via SPI. The SPI connection is shared with LCD screen.
+The example `lvgl_demo_ui` currently assumes:
 
-## How to use the example
+- **6 relay outputs** on GPIOs:
+  - Relay 1: `GPIO_NUM_35`
+  - Relay 2: `GPIO_NUM_36`
+  - Relay 3: `GPIO_NUM_37`
+  - Relay 4: `GPIO_NUM_38`
+  - Relay 5: `GPIO_NUM_39`
+  - Relay 6: `GPIO_NUM_40`
+- **LED / sense pins and ADC channels** (update as needed for your board):
+  - Relay 1: LED `GPIO_NUM_48`, ADC1 channel 3
+  - Relay 2: LED `GPIO_NUM_21`, ADC1 channel 4
+  - Relay 3: LED `GPIO_NUM_2`,  ADC1 channel 5
+  - Relay 4: LED `GPIO_NUM_14`, ADC1 channel 6
+  - Relay 5: LED `GPIO_NUM_13`, ADC2 channel 0
+  - Relay 6: LED `GPIO_NUM_47`, ADC2 channel 1
 
-### Hardware Required
+Adjust these pin and ADC assignments in `example_lvgl_demo_ui()` to match your actual hardware.
 
-* An ESP development board
-* An GC9A01 or ILI9341 LCD panel, with SPI interface (with/without STMPE610 SPI touch)
-* An USB cable for power supply and programming
+## Project Structure (relevant parts)
 
-### Hardware Connection
+- `main/lvgl_demo_ui.c` – Creates the LVGL screen, relay tiles, master button, and IP label
+- `main/relay_hardware.*` – Relay hardware abstraction (GPIO, ADC, etc.)
+- `main/relay_control_ui.*` – LVGL widgets for each relay (on/off, status, feedback)
+- `main/master_button_ui.*` – LVGL widget for the master control button
 
-The connection between ESP Board and the LCD is as follows:
+## Building and Flashing
 
-```
-       ESP Board                       GC9A01/ILI9341 Panel + TOUCH
-┌──────────────────────┐              ┌────────────────────┐
-│             GND      ├─────────────►│ GND                │
-│                      │              │                    │
-│             3V3      ├─────────────►│ VCC                │
-│                      │              │                    │
-│             PCLK     ├─────────────►│ SCL                │
-│                      │              │                    │
-│             MOSI     ├─────────────►│ MOSI               │
-│                      │              │                    │
-│             MISO     |◄─────────────┤ MISO               │
-│                      │              │                    │
-│             RST      ├─────────────►│ RES                │
-│                      │              │                    │
-│             DC       ├─────────────►│ DC                 │
-│                      │              │                    │
-│             LCD CS   ├─────────────►│ LCD CS             │
-│                      │              │                    │
-│             TOUCH CS ├─────────────►│ TOUCH CS           │
-│                      │              │                    │
-│             BK_LIGHT ├─────────────►│ BLK                │
-└──────────────────────┘              └────────────────────┘
-```
-
-The GPIO number used by this example can be changed in [lvgl_example_main.c](main/spi_lcd_touch_example_main.c).
-Especially, please pay attention to the level used to turn on the LCD backlight, some LCD module needs a low level to turn it on, while others take a high level. You can change the backlight level macro `EXAMPLE_LCD_BK_LIGHT_ON_LEVEL` in [lvgl_example_main.c](main/spi_lcd_touch_example_main.c).
-
-### Build and Flash
-
-Run `idf.py -p PORT build flash monitor` to build, flash and monitor the project. A fancy animation will show up on the LCD as expected.
-
-The first time you run `idf.py` for the example will cost extra time as the build system needs to address the component dependencies and downloads the missing components from the ESP Component Registry into `managed_components` folder.
-
-(To exit the serial monitor, type ``Ctrl-]``.)
-
-See the [Getting Started Guide](https://docs.espressif.com/projects/esp-idf/en/latest/get-started/index.html) for full steps to configure and use ESP-IDF to build projects.
-
-### Example Output
+- **Requirements**:
+  - ESP-IDF installed and added to your `PATH`
+  - Supported ESP32‑series board
+  - SPI LCD compatible with your chosen LVGL/`esp_lcd` configuration
+- **Build and flash**:
 
 ```bash
-...
-I (409) cpu_start: Starting scheduler on APP CPU.
-I (419) example: Turn off LCD backlight
-I (419) gpio: GPIO[2]| InputEn: 0| OutputEn: 1| OpenDrain: 0| Pullup: 0| Pulldown: 0| Intr:0
-I (429) example: Initialize SPI bus
-I (439) example: Install panel IO
-I (439) gpio: GPIO[5]| InputEn: 0| OutputEn: 1| OpenDrain: 0| Pullup: 0| Pulldown: 0| Intr:0
-I (449) example: Install GC9A01 panel driver
-I (459) gpio: GPIO[3]| InputEn: 0| OutputEn: 1| OpenDrain: 0| Pullup: 0| Pulldown: 0| Intr:0
-I (589) gpio: GPIO[0]| InputEn: 0| OutputEn: 1| OpenDrain: 0| Pullup: 0| Pulldown: 0| Intr:0
-I (589) example: Initialize touch controller STMPE610
-I (589) STMPE610: TouchPad ID: 0x0811
-I (589) STMPE610: TouchPad Ver: 0x03
-I (599) example: Turn on LCD backlight
-I (599) example: Initialize LVGL library
-I (609) example: Register display driver to LVGL
-I (619) example: Install LVGL tick timer
-I (619) example: Starting LVGL task
-I (619) example: Display LVGL animation
-I (619) example: Display LVGL Meter Widget
-...
+idf.py set-target <your_target>   # e.g. esp32s3
+idf.py -p <PORT> build flash monitor
 ```
 
+Replace `<PORT>` with the serial port for your board (for example, `tty.usbserial-xxxxx` on macOS).
+
+## Runtime Behavior
+
+On boot, the firmware:
+
+1. Initializes relay hardware objects for all six relays.
+2. Creates LVGL relay control widgets and positions them on the screen.
+3. (Optionally) wires the master button to control all relays.
+4. Creates the IP label at the bottom of the screen.
+
+To update the IP display at runtime, call:
+
+```c
+example_lvgl_update_ip_address("192.168.1.10");
+```
+
+Passing `NULL` or an empty string will reset the label to `IP: --` and gray text.
 
 ## Troubleshooting
 
-* Why the LCD doesn't light up?
-  * Check the backlight's turn-on level, and update it in `EXAMPLE_LCD_BK_LIGHT_ON_LEVEL`
+- **Relays or LEDs don’t respond**:
+  - Verify the GPIO pin numbers and ADC channels in `example_lvgl_demo_ui()` match your actual wiring.
+  - Check that the relay board is powered and that any optocouplers/driver circuits are correctly referenced.
+- **LVGL UI appears but layout is wrong**:
+  - Make sure your display resolution and LVGL configuration match the screen you are using.
+  - Adjust the alignment/offsets in `relay_control_ui_create()` calls if needed.
 
-For any technical queries, please open an [issue] (https://github.com/espressif/esp-idf/issues) on GitHub. We will get back to you soon.
