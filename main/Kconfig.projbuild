@@ -1,5 +1,23 @@
 menu "Example Configuration"
 
+    config SMARTSOCKET_WIFI_SSID
+        string "WiFi SSID"
+        default "SSID"
+        help
+            SSID (network name) of the WiFi network to connect to.
+
+    config SMARTSOCKET_WIFI_PASSWORD
+        string "WiFi password"
+        default "PASSWORD"
+        help
+            Password of the WiFi network to connect to.
+
+    config SMARTSOCKET_OTA_HOSTNAME
+        string "OTA server hostname"
+        default "smartsocket.local"
+        help
+            Hostname used for OTA firmware updates.
+
     choice EXAMPLE_LCD_CONTROLLER
         prompt "LCD controller model"
         default EXAMPLE_LCD_CONTROLLER_ILI9341

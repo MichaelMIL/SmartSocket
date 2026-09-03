@@ -1,7 +1,9 @@
 # ESP-IDF Build System
 build/
 sdkconfig.old
-sdkconfig.defaults
+# sdkconfig is generated and holds local WiFi credentials - keep it out of git.
+# sdkconfig.defaults (tracked) seeds a fresh checkout.
+sdkconfig
 
 # Python
 __pycache__/
@@ -101,3 +103,5 @@ sdkconfig.backup
 sdkconfig.ci.backup
 
 .DS_Store
+# clangd / tooling cache
+.cache/

@@ -18,8 +18,8 @@
 extern "C" {
 #endif
 
-#define RELAY_TIMER_DURATION_SECONDS (30 * 60)  // 30 minutes in seconds
-// #define RELAY_TIMER_DURATION_SECONDS (10 * 60)  // 10 seconds in seconds
+#define RELAY_TIMER_DURATION_SECONDS (30 * 60)  // Auto-off timeout: 30 minutes
+// #define RELAY_TIMER_DURATION_SECONDS 10       // Short timeout, useful for testing
 #define BUTTON_WIDTH_PX 100
 #define BUTTON_HEIGHT_PX 60
 #define BUTTON_OFF_COLOR lv_color_hex(0xC00000)
@@ -40,7 +40,7 @@ extern "C" {
 #define CURRENT_LABEL_Y_OFFSET_PX 50
 #define CURRENT_LABEL_TEXT_COLOR lv_color_hex(0xFFFF00)
 #define CURRENT_LABEL_TEXT_ALIGN LV_TEXT_ALIGN_CENTER
-#define CURRENT_UPDATE_INTERVAL_MS 500  // Update current reading every 500ms
+#define CURRENT_UPDATE_INTERVAL_MS 1000  // Update current reading every 1s (6 relays sample sequentially in the LVGL task)
 
 
 /**
@@ -131,6 +131,21 @@ void relay_control_ui_toggle(relay_control_ui_t *ui);
  * @return lv_obj_t* Pointer to the button object
  */
 lv_obj_t *relay_control_ui_get_button(relay_control_ui_t *ui);
+
+/**
+ * @brief Get the hardware object backing this relay UI
+ *
+ * @param ui Pointer to the relay control UI object
+ * @return relay_hardware_t* Hardware object, or NULL if UI-only
+ */
+relay_hardware_t *relay_control_ui_get_hardware(relay_control_ui_t *ui);
+
+/**
+ * @brief Get a description of the last relay_control_ui_create failure
+ *
+ * @return Static string describing the last creation error ("none" if no error)
+ */
+const char *relay_control_ui_last_error(void);
 
 /**
  * @brief Set state change callback

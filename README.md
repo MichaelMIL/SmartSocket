@@ -40,14 +40,16 @@ The example `lvgl_demo_ui` currently assumes:
   - Relay 5: LED `GPIO_NUM_13`, ADC2 channel 0
   - Relay 6: LED `GPIO_NUM_47`, ADC2 channel 1
 
-Adjust these pin and ADC assignments in `example_lvgl_demo_ui()` to match your actual hardware.
+Adjust these pin and ADC assignments in the `s_relay_configs` table in `main/lvgl_demo_ui.c` to match your actual hardware.
 
 ## Project Structure (relevant parts)
 
-- `main/lvgl_demo_ui.c` – Creates the LVGL screen, relay tiles, master button, and IP label
-- `main/relay_hardware.*` – Relay hardware abstraction (GPIO, ADC, etc.)
-- `main/relay_control_ui.*` – LVGL widgets for each relay (on/off, status, feedback)
-- `main/master_button_ui.*` – LVGL widget for the master control button
+- `main/lvgl_demo_ui.c` / `.h` – Composition root: relay config table, LVGL screen, relay tiles, master button, and IP label
+- `main/components/relay_control_ui/relay_hardware.*` – Relay hardware abstraction (GPIO, LED, ADC current sensing)
+- `main/components/relay_control_ui/relay_control_ui.*` – LVGL widgets for each relay (on/off, auto-off timer, current display)
+- `main/components/relay_control_ui/master_button_ui.*` – LVGL widget for the master control button
+- `main/components/wifi_ota/` – WiFi connection, OTA updates, and the embedded web server
+- `main/web/index.html` – Web control panel (packed into the SPIFFS image at build time)
 
 ## Building and Flashing
 
@@ -55,6 +57,12 @@ Adjust these pin and ADC assignments in `example_lvgl_demo_ui()` to match your a
   - ESP-IDF installed and added to your `PATH`
   - Supported ESP32‑series board
   - SPI LCD compatible with your chosen LVGL/`esp_lcd` configuration
+- **Configure WiFi credentials**:
+
+```bash
+idf.py menuconfig   # Example Configuration -> WiFi SSID / WiFi password
+```
+
 - **Build and flash**:
 
 ```bash
@@ -63,6 +71,8 @@ idf.py -p <PORT> build flash monitor
 ```
 
 Replace `<PORT>` with the serial port for your board (for example, `tty.usbserial-xxxxx` on macOS).
+
+After the first flash, the device serves a web control panel at `http://<device-ip>/` with relay control and browser-based OTA firmware updates (upload the new `build/*.bin` on the Firmware Update tab).
 
 ## Runtime Behavior
 
@@ -84,7 +94,7 @@ Passing `NULL` or an empty string will reset the label to `IP: --` and gray text
 ## Troubleshooting
 
 - **Relays or LEDs don’t respond**:
-  - Verify the GPIO pin numbers and ADC channels in `example_lvgl_demo_ui()` match your actual wiring.
+  - Verify the GPIO pin numbers and ADC channels in the `s_relay_configs` table in `main/lvgl_demo_ui.c` match your actual wiring.
   - Check that the relay board is powered and that any optocouplers/driver circuits are correctly referenced.
 - **LVGL UI appears but layout is wrong**:
   - Make sure your display resolution and LVGL configuration match the screen you are using.

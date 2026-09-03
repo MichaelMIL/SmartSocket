@@ -14,6 +14,7 @@
 #include "esp_netif.h"
 #include "esp_http_client.h"
 #include "esp_https_ota.h"
+#include "nvs.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/event_groups.h"
@@ -24,9 +25,104 @@ static const char *TAG = "wifi_ota";
 #define WIFI_FAIL_BIT      BIT1
 #define WIFI_MAXIMUM_RETRY 5
 
+// Provisioning access point (started when STA connection fails)
+#define WIFI_NVS_NAMESPACE   "wifi_cfg"
+#define PROV_AP_SSID         "SmartSocket-Setup"
+#define PROV_AP_CHANNEL      1
+#define PROV_AP_MAX_CONN     2
+
 static EventGroupHandle_t s_wifi_event_group;
 static int s_retry_num = 0;
 static bool s_wifi_connected = false;
+static bool s_ap_mode = false;
+
+/**
+ * @brief Load WiFi credentials saved via the web UI from NVS
+ *
+ * @return true if a non-empty SSID was found
+ */
+static bool load_saved_credentials(char *ssid, size_t ssid_len, char *password, size_t password_len)
+{
+    nvs_handle_t nvs;
+    if (nvs_open(WIFI_NVS_NAMESPACE, NVS_READONLY, &nvs) != ESP_OK) {
+        return false;
+    }
+
+    size_t sl = ssid_len;
+    bool found = (nvs_get_str(nvs, "ssid", ssid, &sl) == ESP_OK) && (ssid[0] != '\0');
+    if (found) {
+        size_t pl = password_len;
+        if (nvs_get_str(nvs, "password", password, &pl) != ESP_OK) {
+            password[0] = '\0';
+        }
+    }
+
+    nvs_close(nvs);
+    return found;
+}
+
+esp_err_t wifi_ota_save_credentials(const char *ssid, const char *password)
+{
+    if (ssid == NULL || ssid[0] == '\0') {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    nvs_handle_t nvs;
+    esp_err_t err = nvs_open(WIFI_NVS_NAMESPACE, NVS_READWRITE, &nvs);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to open NVS for WiFi credentials: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    err = nvs_set_str(nvs, "ssid", ssid);
+    if (err == ESP_OK) {
+        err = nvs_set_str(nvs, "password", (password != NULL) ? password : "");
+    }
+    if (err == ESP_OK) {
+        err = nvs_commit(nvs);
+    }
+    nvs_close(nvs);
+
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "WiFi credentials saved (SSID: %s)", ssid);
+    } else {
+        ESP_LOGE(TAG, "Failed to save WiFi credentials: %s", esp_err_to_name(err));
+    }
+    return err;
+}
+
+/**
+ * @brief Switch to AP mode so WiFi can be configured via the web UI
+ *
+ * @return esp_err_t ESP_OK on success
+ */
+static esp_err_t start_provisioning_ap(void)
+{
+    esp_netif_create_default_wifi_ap();
+
+    wifi_config_t ap_config = {
+        .ap = {
+            .ssid = PROV_AP_SSID,
+            .ssid_len = strlen(PROV_AP_SSID),
+            .channel = PROV_AP_CHANNEL,
+            .max_connection = PROV_AP_MAX_CONN,
+            .authmode = WIFI_AUTH_OPEN,
+        },
+    };
+
+    esp_err_t err = esp_wifi_set_mode(WIFI_MODE_AP);
+    if (err == ESP_OK) {
+        err = esp_wifi_set_config(WIFI_IF_AP, &ap_config);
+    }
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to start provisioning AP: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    s_ap_mode = true;
+    ESP_LOGW(TAG, "Provisioning AP started: connect to \"%s\" and open http://192.168.4.1 to configure WiFi", PROV_AP_SSID);
+    return ESP_OK;
+}
 
 /**
  * @brief WiFi event handler
@@ -87,22 +183,34 @@ esp_err_t wifi_ota_init(const wifi_ota_config_t *config)
                                                         NULL,
                                                         &instance_got_ip));
 
+    // Credentials saved via the web UI (NVS) take precedence over compiled-in defaults
+    static char saved_ssid[33];
+    static char saved_password[65];
+    const char *ssid = config->ssid;
+    const char *password = config->password;
+    if (load_saved_credentials(saved_ssid, sizeof(saved_ssid), saved_password, sizeof(saved_password))) {
+        ESP_LOGI(TAG, "Using WiFi credentials saved in NVS (SSID: %s)", saved_ssid);
+        ssid = saved_ssid;
+        password = saved_password;
+    }
+
+    bool has_password = (password != NULL && password[0] != '\0');
     wifi_config_t wifi_config = {
         .sta = {
-            .threshold.authmode = WIFI_AUTH_WPA2_PSK,
+            .threshold.authmode = has_password ? WIFI_AUTH_WPA2_PSK : WIFI_AUTH_OPEN,
         },
     };
-    
-    strncpy((char*)wifi_config.sta.ssid, config->ssid, sizeof(wifi_config.sta.ssid) - 1);
-    if (config->password != NULL) {
-        strncpy((char*)wifi_config.sta.password, config->password, sizeof(wifi_config.sta.password) - 1);
+
+    strncpy((char*)wifi_config.sta.ssid, ssid, sizeof(wifi_config.sta.ssid) - 1);
+    if (has_password) {
+        strncpy((char*)wifi_config.sta.password, password, sizeof(wifi_config.sta.password) - 1);
     }
 
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
     ESP_ERROR_CHECK(esp_wifi_start());
 
-    ESP_LOGI(TAG, "WiFi initialization finished. Connecting to SSID: %s", config->ssid);
+    ESP_LOGI(TAG, "WiFi initialization finished. Connecting to SSID: %s", ssid);
 
     EventBits_t bits = xEventGroupWaitBits(s_wifi_event_group,
                                            WIFI_CONNECTED_BIT | WIFI_FAIL_BIT,
@@ -111,8 +219,8 @@ esp_err_t wifi_ota_init(const wifi_ota_config_t *config)
                                            portMAX_DELAY);
 
     if (bits & WIFI_CONNECTED_BIT) {
-        ESP_LOGI(TAG, "Connected to AP SSID: %s", config->ssid);
-        
+        ESP_LOGI(TAG, "Connected to AP SSID: %s", ssid);
+
         // Start HTTP server for firmware uploads (optional)
         // You can disable this by not calling wifi_ota_start_http_server()
         // or by setting config->ota_url to NULL
@@ -121,10 +229,17 @@ esp_err_t wifi_ota_init(const wifi_ota_config_t *config)
             uint16_t port = (config->ota_port > 0) ? config->ota_port : 80;
             wifi_ota_start_http_server(port);
         }
-        
+
         return ESP_OK;
     } else if (bits & WIFI_FAIL_BIT) {
-        ESP_LOGE(TAG, "Failed to connect to SSID: %s", config->ssid);
+        ESP_LOGE(TAG, "Failed to connect to SSID: %s", ssid);
+
+        // Fall back to a provisioning access point so WiFi can be configured
+        // from the web UI at http://192.168.4.1 (WiFi Settings tab)
+        if (start_provisioning_ap() == ESP_OK) {
+            uint16_t port = (config->ota_port > 0) ? config->ota_port : 80;
+            http_server_start(port);
+        }
         return ESP_FAIL;
     } else {
         ESP_LOGE(TAG, "Unexpected event");
@@ -220,12 +335,31 @@ bool wifi_ota_is_connected(void)
 }
 
 /**
+ * @brief Check whether the device is running the provisioning access point
+ */
+bool wifi_ota_is_ap_mode(void)
+{
+    return s_ap_mode;
+}
+
+/**
  * @brief Get current IP address
  */
 esp_err_t wifi_ota_get_ip(char *ip_str, size_t len)
 {
     if (ip_str == NULL || len < 16) {
         return ESP_ERR_INVALID_ARG;
+    }
+
+    if (s_ap_mode) {
+        // Report the provisioning AP address
+        esp_netif_t *ap_netif = esp_netif_get_handle_from_ifkey("WIFI_AP_DEF");
+        esp_netif_ip_info_t ap_ip_info;
+        if (ap_netif != NULL && esp_netif_get_ip_info(ap_netif, &ap_ip_info) == ESP_OK) {
+            snprintf(ip_str, len, IPSTR, IP2STR(&ap_ip_info.ip));
+            return ESP_OK;
+        }
+        return ESP_ERR_INVALID_STATE;
     }
 
     if (!s_wifi_connected) {

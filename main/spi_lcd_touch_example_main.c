@@ -21,7 +21,8 @@
 #include "lvgl.h"
 #include "wifi_ota.h"
 #include "nvs_flash.h"
-#include "relay_control_ui.h"
+#include "esp_ota_ops.h"
+#include "lvgl_demo_ui.h"
 
 #if CONFIG_EXAMPLE_LCD_CONTROLLER_ILI9341
 #include "esp_lcd_ili9341.h"
@@ -74,10 +75,6 @@ static const char *TAG = "example";
 
 // LVGL library is not thread-safe, this example will call LVGL APIs from different tasks, so use a mutex to protect it
 static _lock_t lvgl_api_lock;
-
-extern void example_lvgl_demo_ui(lv_disp_t *disp);
-extern void example_lvgl_update_ip_address(const char *ip_str);
-extern relay_control_ui_t *example_lvgl_get_relay_ui(int index);
 
 static bool example_notify_lvgl_flush_ready(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_io_event_data_t *edata, void *user_ctx)
 {
@@ -184,14 +181,13 @@ void app_main(void)
     }
     ESP_ERROR_CHECK(ret);
 
-    // Initialize WiFi and OTA (optional - configure with your WiFi credentials)
-    // Uncomment and configure these lines to enable WiFi/OTA:
-    
+    // Initialize WiFi and OTA. Credentials come from Kconfig:
+    // idf.py menuconfig -> Example Configuration -> WiFi SSID / WiFi password
     wifi_ota_config_t wifi_config = {
-        .ssid = "SSID",
-        .password = "PASSWORD",
+        .ssid = CONFIG_SMARTSOCKET_WIFI_SSID,
+        .password = CONFIG_SMARTSOCKET_WIFI_PASSWORD,
         .ota_url = NULL,  // Set to OTA URL if you want automatic updates
-        .ota_host = "smartsocket.local",  // Set to OTA server hostname
+        .ota_host = CONFIG_SMARTSOCKET_OTA_HOSTNAME,
         .ota_port = 80,
     };
     if (wifi_ota_init(&wifi_config) == ESP_OK) {
@@ -370,17 +366,28 @@ void app_main(void)
     _lock_acquire(&lvgl_api_lock);
     example_lvgl_demo_ui(display);
     
-    // Update IP address on screen if WiFi is connected
-    if (wifi_ota_is_connected()) {
-        char ip_str[16];
-        if (wifi_ota_get_ip(ip_str, sizeof(ip_str)) == ESP_OK) {
-            example_lvgl_update_ip_address(ip_str);
-        } else {
-            example_lvgl_update_ip_address(NULL);
-        }
+    // Show the device IP (STA address, or 192.168.4.1 in provisioning AP mode)
+    char ip_str[16];
+    if (wifi_ota_get_ip(ip_str, sizeof(ip_str)) == ESP_OK) {
+        example_lvgl_update_ip_address(ip_str);
     } else {
         example_lvgl_update_ip_address(NULL);
     }
     
     _lock_release(&lvgl_api_lock);
+
+    // We booted far enough to init the display, WiFi and HTTP server successfully.
+    // Confirm this app image is good so the bootloader keeps it. With OTA rollback
+    // enabled, a freshly OTA'd app that crashes before reaching here is reverted to
+    // the previous working image on the next reboot. Harmless if rollback is off.
+    const esp_partition_t *running = esp_ota_get_running_partition();
+    esp_ota_img_states_t ota_state;
+    if (esp_ota_get_state_partition(running, &ota_state) == ESP_OK &&
+        ota_state == ESP_OTA_IMG_PENDING_VERIFY) {
+        if (esp_ota_mark_app_valid_cancel_rollback() == ESP_OK) {
+            ESP_LOGI(TAG, "App image marked valid, rollback cancelled");
+        } else {
+            ESP_LOGE(TAG, "Failed to mark app image valid");
+        }
+    }
 }

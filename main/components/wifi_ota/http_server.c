@@ -5,26 +5,30 @@
  */
 
 #include "http_server.h"
+#include "wifi_ota.h"
 #include <string.h>
 #include <stdbool.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <unistd.h>
 #include <sys/stat.h>
 #include <dirent.h>
 #include "esp_log.h"
+#include "esp_system.h"
+#include "esp_app_desc.h"
 #include "esp_http_server.h"
 #include "esp_ota_ops.h"
 #include "esp_partition.h"
-#include "esp_vfs.h"
 #include "esp_spiffs.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "relay_control_ui.h"
-
-// Forward declaration
-extern relay_control_ui_t *example_lvgl_get_relay_ui(int index);
+#include "lvgl_demo_ui.h"
 
 static const char *TAG = "http_server";
+
+// Max consecutive httpd_req_recv timeouts before giving up on an upload.
+// The httpd task is shared by all requests - a dead client must not wedge the server.
+#define HTTP_RECV_TIMEOUT_RETRIES 5
 
 static httpd_handle_t server_handle = NULL;
 static bool server_running = false;
@@ -32,7 +36,7 @@ static bool server_running = false;
 /**
  * @brief Initialize SPIFFS filesystem
  */
-esp_err_t http_server_init_spiffs(void)
+static esp_err_t http_server_init_spiffs(void)
 {
     esp_vfs_spiffs_conf_t conf = {
         .base_path = "/spiffs",
@@ -102,9 +106,9 @@ static const char* get_content_type(const char *filename)
 static esp_err_t file_handler(httpd_req_t *req)
 {
     char filepath[256];
-    
-    // Map root to index.html
-    if (strcmp(req->uri, "/") == 0) {
+
+    // Map page routes to index.html (single-page app with JS tabs)
+    if (strcmp(req->uri, "/") == 0 || strcmp(req->uri, "/update") == 0) {
         strcpy(filepath, "/spiffs/index.html");
     } else {
         // Check URI length to prevent buffer overflow
@@ -155,65 +159,71 @@ static esp_err_t file_handler(httpd_req_t *req)
 }
 
 /**
- * @brief Handler for root path - serves index.html from SPIFFS
+ * @brief Send a JSON error response
  */
-static esp_err_t control_page_handler(httpd_req_t *req)
+static void send_json_error(httpd_req_t *req, const char *status, const char *error_msg)
 {
-    return file_handler(req);
+    char body[96];
+    snprintf(body, sizeof(body), "{\"success\":false,\"error\":\"%s\"}", error_msg);
+    httpd_resp_set_status(req, status);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, body, HTTPD_RESP_USE_STRLEN);
 }
 
 /**
- * @brief Handler for firmware update page - serves index.html from SPIFFS
+ * @brief Send the relay state as a JSON response
  */
-static esp_err_t update_page_handler(httpd_req_t *req)
+static esp_err_t send_relay_state(httpd_req_t *req, int relay_id, bool state)
 {
-    return file_handler(req);
+    char response[64];
+    snprintf(response, sizeof(response), "{\"success\":true,\"id\":%d,\"state\":%s}",
+             relay_id, state ? "true" : "false");
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, response, HTTPD_RESP_USE_STRLEN);
+    return ESP_OK;
 }
 
-// Removed embedded HTML - now using SPIFFS
+/**
+ * @brief Resolve the relay UI object from a /api/relay/<id> URI
+ *
+ * Sends the appropriate JSON error response on failure.
+ *
+ * @param req HTTP request
+ * @param out_id Receives the parsed relay ID (1-based)
+ * @return Relay UI object, or NULL if the ID is invalid or the UI is not created yet
+ */
+static relay_control_ui_t *relay_from_request(httpd_req_t *req, int *out_id)
+{
+    const char *id_start = strrchr(req->uri, '/');
+    int relay_id = (id_start != NULL) ? atoi(id_start + 1) : 0;
+    if (relay_id < 1 || relay_id > SMARTSOCKET_RELAY_COUNT) {
+        send_json_error(req, "400 Bad Request", "Invalid relay ID");
+        return NULL;
+    }
 
-// Old handlers removed - now using file_handler from SPIFFS
+    relay_control_ui_t *relay_ui = example_lvgl_get_relay_ui(relay_id);
+    if (relay_ui == NULL) {
+        ESP_LOGW(TAG, "Relay UI %d not found (may not be initialized yet)", relay_id);
+        send_json_error(req, "503 Service Unavailable", "Relay not initialized");
+        return NULL;
+    }
+
+    *out_id = relay_id;
+    return relay_ui;
+}
 
 /**
  * @brief Handler for getting relay status (GET /api/relay/<id>)
  */
 static esp_err_t relay_get_handler(httpd_req_t *req)
 {
-    // Extract relay ID from URI (format: /api/relay/1)
-    const char *uri = req->uri;
-    const char *id_start = strrchr(uri, '/');
-    if (id_start == NULL) {
-        httpd_resp_set_status(req, "400 Bad Request");
-        httpd_resp_set_type(req, "application/json");
-        httpd_resp_send(req, "{\"success\":false,\"error\":\"Invalid URI\"}", HTTPD_RESP_USE_STRLEN);
-        return ESP_FAIL;
-    }
-    
-    id_start++; // Skip '/'
-    int relay_id = atoi(id_start);
-    if (relay_id < 1 || relay_id > 6) {
-        httpd_resp_set_status(req, "400 Bad Request");
-        httpd_resp_set_type(req, "application/json");
-        httpd_resp_send(req, "{\"success\":false,\"error\":\"Invalid relay ID\"}", HTTPD_RESP_USE_STRLEN);
-        return ESP_FAIL;
-    }
-    
-    relay_control_ui_t *relay_ui = example_lvgl_get_relay_ui(relay_id);
+    int relay_id;
+    relay_control_ui_t *relay_ui = relay_from_request(req, &relay_id);
     if (relay_ui == NULL) {
-        ESP_LOGW(TAG, "Relay UI %d not found (may not be initialized yet)", relay_id);
-        httpd_resp_set_status(req, "503 Service Unavailable");
-        httpd_resp_set_type(req, "application/json");
-        httpd_resp_send(req, "{\"success\":false,\"error\":\"Relay not initialized\"}", HTTPD_RESP_USE_STRLEN);
-        return ESP_OK;  // Return OK to avoid error logging, but indicate service unavailable
+        return ESP_OK;  // Error response already sent
     }
-    
-    bool state = relay_control_ui_get_state(relay_ui);
-    char response[128];
-    snprintf(response, sizeof(response), "{\"success\":true,\"id\":%d,\"state\":%s}", relay_id, state ? "true" : "false");
-    
-    httpd_resp_set_type(req, "application/json");
-    httpd_resp_send(req, response, HTTPD_RESP_USE_STRLEN);
-    return ESP_OK;
+
+    return send_relay_state(req, relay_id, relay_control_ui_get_state(relay_ui));
 }
 
 /**
@@ -221,58 +231,359 @@ static esp_err_t relay_get_handler(httpd_req_t *req)
  */
 static esp_err_t relay_post_handler(httpd_req_t *req)
 {
-    char relay_id_str[8] = {0};
-    const char *uri = req->uri;
-    const char *id_start = strrchr(uri, '/');
-    if (id_start != NULL) {
-        id_start++; // Skip '/'
-        strncpy(relay_id_str, id_start, sizeof(relay_id_str) - 1);
-    }
-    
-    int relay_id = atoi(relay_id_str);
-    if (relay_id < 1 || relay_id > 6) {
-        httpd_resp_set_status(req, "400 Bad Request");
-        httpd_resp_set_type(req, "application/json");
-        httpd_resp_send(req, "{\"success\":false,\"error\":\"Invalid relay ID\"}", HTTPD_RESP_USE_STRLEN);
-        return ESP_FAIL;
-    }
-    
-    relay_control_ui_t *relay_ui = example_lvgl_get_relay_ui(relay_id);
+    int relay_id;
+    relay_control_ui_t *relay_ui = relay_from_request(req, &relay_id);
     if (relay_ui == NULL) {
-        ESP_LOGW(TAG, "Relay UI %d not found (may not be initialized yet)", relay_id);
-        httpd_resp_set_status(req, "503 Service Unavailable");
-        httpd_resp_set_type(req, "application/json");
-        httpd_resp_send(req, "{\"success\":false,\"error\":\"Relay not initialized\"}", HTTPD_RESP_USE_STRLEN);
-        return ESP_OK;  // Return OK to avoid error logging, but indicate service unavailable
+        return ESP_OK;  // Error response already sent
     }
-    
+
     // Read JSON body
     char content[128] = {0};
     int ret = httpd_req_recv(req, content, sizeof(content) - 1);
     if (ret <= 0) {
-        httpd_resp_set_status(req, "400 Bad Request");
-        httpd_resp_set_type(req, "application/json");
-        httpd_resp_send(req, "{\"success\":false,\"error\":\"No data received\"}", HTTPD_RESP_USE_STRLEN);
+        send_json_error(req, "400 Bad Request", "No data received");
         return ESP_FAIL;
     }
-    
+
     // Parse JSON (simple parsing for "state":true/false)
-    bool new_state = false;
+    bool new_state;
     if (strstr(content, "\"state\":true") != NULL || strstr(content, "'state':true") != NULL) {
         new_state = true;
     } else if (strstr(content, "\"state\":false") != NULL || strstr(content, "'state':false") != NULL) {
         new_state = false;
     } else {
-        // Try to toggle if no state specified
+        // Toggle if no state specified
         new_state = !relay_control_ui_get_state(relay_ui);
     }
-    
+
     // Set relay state (this will update UI and hardware)
     relay_control_ui_set_state(relay_ui, new_state);
-    
+
+    return send_relay_state(req, relay_id, new_state);
+}
+
+/**
+ * @brief Extract a string value from a flat JSON body (no escape handling)
+ *
+ * @return true if the key was found and the value copied to out
+ */
+static bool json_get_string(const char *json, const char *key, char *out, size_t out_len)
+{
+    char pattern[48];
+    snprintf(pattern, sizeof(pattern), "\"%s\"", key);
+
+    const char *p = strstr(json, pattern);
+    if (p == NULL) {
+        return false;
+    }
+    p = strchr(p + strlen(pattern), ':');
+    if (p == NULL) {
+        return false;
+    }
+    p++;
+    while (*p == ' ' || *p == '\t') {
+        p++;
+    }
+    if (*p != '"') {
+        return false;
+    }
+    p++;
+
+    size_t i = 0;
+    while (*p != '\0' && *p != '"' && i < out_len - 1) {
+        out[i++] = *p++;
+    }
+    if (*p != '"') {
+        return false;  // Value truncated or unterminated
+    }
+    out[i] = '\0';
+    return true;
+}
+
+/**
+ * @brief Handler for WiFi status (GET /api/wifi)
+ */
+static esp_err_t wifi_get_handler(httpd_req_t *req)
+{
+    char ip[16] = "";
+    wifi_ota_get_ip(ip, sizeof(ip));
+
     char response[128];
-    snprintf(response, sizeof(response), "{\"success\":true,\"id\":%d,\"state\":%s}", relay_id, new_state ? "true" : "false");
-    
+    snprintf(response, sizeof(response),
+             "{\"success\":true,\"connected\":%s,\"ap_mode\":%s,\"ip\":\"%s\"}",
+             wifi_ota_is_connected() ? "true" : "false",
+             wifi_ota_is_ap_mode() ? "true" : "false",
+             ip);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, response, HTTPD_RESP_USE_STRLEN);
+    return ESP_OK;
+}
+
+/**
+ * @brief Handler for setting WiFi credentials (POST /api/wifi)
+ *
+ * Body: {"ssid":"...","password":"..."}. Credentials are stored in NVS and
+ * the device reboots to apply them. Used both from the provisioning AP and
+ * from the normal control page.
+ */
+static esp_err_t wifi_post_handler(httpd_req_t *req)
+{
+    char content[256] = {0};
+    int ret = httpd_req_recv(req, content, sizeof(content) - 1);
+    if (ret <= 0) {
+        send_json_error(req, "400 Bad Request", "No data received");
+        return ESP_FAIL;
+    }
+
+    char ssid[33] = {0};
+    char password[65] = {0};
+    if (!json_get_string(content, "ssid", ssid, sizeof(ssid)) || ssid[0] == '\0') {
+        send_json_error(req, "400 Bad Request", "Missing or invalid ssid");
+        return ESP_FAIL;
+    }
+    json_get_string(content, "password", password, sizeof(password));  // Optional (open network)
+
+    esp_err_t err = wifi_ota_save_credentials(ssid, password);
+    if (err != ESP_OK) {
+        send_json_error(req, "500 Internal Server Error", "Failed to save credentials");
+        return err;
+    }
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, "{\"success\":true,\"message\":\"Credentials saved, rebooting...\"}", HTTPD_RESP_USE_STRLEN);
+
+    ESP_LOGI(TAG, "WiFi credentials updated (SSID: %s), rebooting to apply", ssid);
+    vTaskDelay(1500 / portTICK_PERIOD_MS);
+    esp_restart();
+    return ESP_OK;  // Unreachable
+}
+
+#define WEB_INDEX_PATH     "/spiffs/index.html"
+#define WEB_INDEX_TMP_PATH "/spiffs/index.new"
+
+/**
+ * @brief Handler for updating the web page (POST /update-web)
+ *
+ * Accepts the raw index.html file as the request body and replaces the copy
+ * in SPIFFS. Written to a temporary file first so an interrupted upload
+ * does not corrupt the existing page.
+ */
+static esp_err_t web_update_post_handler(httpd_req_t *req)
+{
+    size_t content_len = req->content_len;
+    ESP_LOGI(TAG, "Web page update request, content_len: %zu bytes", content_len);
+
+    FILE *f = fopen(WEB_INDEX_TMP_PATH, "w");
+    if (f == NULL) {
+        send_json_error(req, "500 Internal Server Error", "Failed to open file (SPIFFS mounted?)");
+        return ESP_FAIL;
+    }
+
+    const size_t buf_size = 4096;
+    char *buf = (char *)malloc(buf_size);
+    if (buf == NULL) {
+        fclose(f);
+        unlink(WEB_INDEX_TMP_PATH);
+        send_json_error(req, "500 Internal Server Error", "Memory allocation failed");
+        return ESP_ERR_NO_MEM;
+    }
+
+    size_t received = 0;
+    esp_err_t result = ESP_OK;
+    const char *error_msg = NULL;
+    int timeout_retries = 0;
+
+    while (content_len == 0 || received < content_len) {
+        int recv_len = httpd_req_recv(req, buf, buf_size);
+        if (recv_len < 0) {
+            // Cap retries: the httpd task is shared, a dead client must not wedge the server
+            if (recv_len == HTTPD_SOCK_ERR_TIMEOUT && ++timeout_retries < HTTP_RECV_TIMEOUT_RETRIES) {
+                continue;
+            }
+            error_msg = "Receive failed";
+            result = ESP_FAIL;
+            break;
+        }
+        timeout_retries = 0;
+        if (recv_len == 0) {
+            break;  // Connection closed
+        }
+        if (fwrite(buf, 1, recv_len, f) != (size_t)recv_len) {
+            error_msg = "Write failed (SPIFFS full?)";
+            result = ESP_FAIL;
+            break;
+        }
+        received += recv_len;
+    }
+
+    free(buf);
+    fclose(f);
+
+    if (result != ESP_OK || received == 0) {
+        unlink(WEB_INDEX_TMP_PATH);
+        send_json_error(req, (received == 0 && result == ESP_OK) ? "400 Bad Request" : "500 Internal Server Error",
+                        (error_msg != NULL) ? error_msg : "No data received");
+        return ESP_FAIL;
+    }
+
+    // Atomically-ish swap in the new page
+    unlink(WEB_INDEX_PATH);
+    if (rename(WEB_INDEX_TMP_PATH, WEB_INDEX_PATH) != 0) {
+        send_json_error(req, "500 Internal Server Error", "Failed to replace page");
+        return ESP_FAIL;
+    }
+
+    char response[96];
+    snprintf(response, sizeof(response), "{\"success\":true,\"bytes\":%zu}", received);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, response, HTTPD_RESP_USE_STRLEN);
+    ESP_LOGI(TAG, "Web page updated: %zu bytes", received);
+    return ESP_OK;
+}
+
+/**
+ * @brief Extract a number value from a flat JSON body
+ *
+ * @return true if the key was found and parsed
+ */
+static bool json_get_float(const char *json, const char *key, float *out)
+{
+    char pattern[48];
+    snprintf(pattern, sizeof(pattern), "\"%s\"", key);
+
+    const char *p = strstr(json, pattern);
+    if (p == NULL) {
+        return false;
+    }
+    p = strchr(p + strlen(pattern), ':');
+    if (p == NULL) {
+        return false;
+    }
+    p++;
+
+    char *end = NULL;
+    float value = strtof(p, &end);
+    if (end == p) {
+        return false;
+    }
+    *out = value;
+    return true;
+}
+
+/**
+ * @brief Handler for reading amp calibration (GET /api/calibrate/<id>)
+ *
+ * Returns the stored calibration plus a live reading for the channel.
+ */
+static esp_err_t calibrate_get_handler(httpd_req_t *req)
+{
+    int relay_id;
+    relay_control_ui_t *relay_ui = relay_from_request(req, &relay_id);
+    if (relay_ui == NULL) {
+        return ESP_OK;  // Error response already sent
+    }
+
+    relay_hardware_t *hw = relay_control_ui_get_hardware(relay_ui);
+    if (hw == NULL) {
+        send_json_error(req, "503 Service Unavailable", "No hardware for this relay");
+        return ESP_OK;
+    }
+
+    float zero_v = 0.0f, gain = 0.0f;
+    relay_hardware_get_calibration(hw, &zero_v, &gain);
+    float raw_v = relay_hardware_read_raw_voltage(hw);
+    float amps = relay_hardware_read_current(hw);
+
+    char response[192];
+    snprintf(response, sizeof(response),
+             "{\"success\":true,\"id\":%d,\"zero_v\":%.4f,\"gain\":%.3f,\"raw_v\":%.4f,\"amps\":%.3f}",
+             relay_id, zero_v, gain, raw_v, amps);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, response, HTTPD_RESP_USE_STRLEN);
+    return ESP_OK;
+}
+
+/**
+ * @brief Handler for amp calibration (POST /api/calibrate/<id>)
+ *
+ * Body: {"action":"zero"}                 - store current reading as the 0 A point (no load!)
+ *       {"action":"gain","amps":2.35}     - derive gain from the amp meter reading
+ *       {"action":"reset"}                - restore datasheet defaults
+ */
+static esp_err_t calibrate_post_handler(httpd_req_t *req)
+{
+    int relay_id;
+    relay_control_ui_t *relay_ui = relay_from_request(req, &relay_id);
+    if (relay_ui == NULL) {
+        return ESP_OK;  // Error response already sent
+    }
+
+    relay_hardware_t *hw = relay_control_ui_get_hardware(relay_ui);
+    if (hw == NULL) {
+        send_json_error(req, "503 Service Unavailable", "No hardware for this relay");
+        return ESP_OK;
+    }
+
+    char content[128] = {0};
+    int ret = httpd_req_recv(req, content, sizeof(content) - 1);
+    if (ret <= 0) {
+        send_json_error(req, "400 Bad Request", "No data received");
+        return ESP_FAIL;
+    }
+
+    char action[16] = {0};
+    if (!json_get_string(content, "action", action, sizeof(action))) {
+        send_json_error(req, "400 Bad Request", "Missing action (zero/gain/reset)");
+        return ESP_FAIL;
+    }
+
+    esp_err_t err;
+    if (strcmp(action, "zero") == 0) {
+        err = relay_hardware_calibrate_zero(hw);
+        if (err != ESP_OK) {
+            send_json_error(req, "500 Internal Server Error", "Zero calibration failed (ADC unavailable?)");
+            return err;
+        }
+    } else if (strcmp(action, "gain") == 0) {
+        float amps = 0.0f;
+        if (!json_get_float(content, "amps", &amps) || amps <= 0.0f) {
+            send_json_error(req, "400 Bad Request", "Missing or invalid amps value");
+            return ESP_FAIL;
+        }
+        err = relay_hardware_calibrate_gain(hw, amps);
+        if (err != ESP_OK) {
+            send_json_error(req, "400 Bad Request", "Gain calibration failed - is the load actually on?");
+            return err;
+        }
+    } else if (strcmp(action, "reset") == 0) {
+        err = relay_hardware_reset_calibration(hw);
+        if (err != ESP_OK) {
+            send_json_error(req, "500 Internal Server Error", "Reset failed");
+            return err;
+        }
+    } else {
+        send_json_error(req, "400 Bad Request", "Unknown action (zero/gain/reset)");
+        return ESP_FAIL;
+    }
+
+    // Return the new calibration state
+    return calibrate_get_handler(req);
+}
+
+/**
+ * @brief Handler for diagnostics (GET /api/debug) - UI init progress and heap stats
+ */
+static esp_err_t debug_get_handler(httpd_req_t *req)
+{
+    const esp_app_desc_t *app = esp_app_get_description();
+    char response[320];
+    snprintf(response, sizeof(response),
+             "{\"success\":true,\"version\":\"%s\",\"built\":\"%s %s\",\"idf\":\"%s\","
+             "\"ui_init\":\"%s\",\"free_heap\":%lu,\"min_free_heap\":%lu}",
+             app->version, app->date, app->time, app->idf_ver,
+             example_lvgl_get_init_status(),
+             (unsigned long)esp_get_free_heap_size(),
+             (unsigned long)esp_get_minimum_free_heap_size());
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, response, HTTPD_RESP_USE_STRLEN);
     return ESP_OK;
@@ -585,10 +896,11 @@ static esp_err_t update_post_handler(httpd_req_t *req)
             // Continue receiving remaining data
             // Note: content_length includes multipart overhead, so we need to read until we find the final boundary
             bool found_final_boundary = false;
+            int timeout_retries = 0;
             while (!found_final_boundary && (content_length == 0 || received < content_length)) {
                 int recv_len = httpd_req_recv(req, buf, buf_size);
                 if (recv_len < 0) {
-                    if (recv_len == HTTPD_SOCK_ERR_TIMEOUT) {
+                    if (recv_len == HTTPD_SOCK_ERR_TIMEOUT && ++timeout_retries < HTTP_RECV_TIMEOUT_RETRIES) {
                         continue;
                     }
                     ESP_LOGE(TAG, "Receive failed");
@@ -598,7 +910,8 @@ static esp_err_t update_post_handler(httpd_req_t *req)
                     httpd_resp_send(req, "Receive failed", HTTPD_RESP_USE_STRLEN);
                     return ESP_FAIL;
                 }
-                
+                timeout_retries = 0;
+
                 if (recv_len == 0) {
                     ESP_LOGI(TAG, "Connection closed, received %zu bytes total (expected ~%zu based on content_length)", received, content_length);
                     // Check if the last buffer we wrote might contain the final boundary
@@ -793,11 +1106,26 @@ static esp_err_t update_post_handler(httpd_req_t *req)
             }
         } else {
             // Not multipart - treat as raw binary
+            // First write the chunk already read during the multipart sniff
+            if (initial_recv > 0) {
+                err = esp_ota_write(ota_handle, (const void *)buf, initial_recv);
+                if (err != ESP_OK) {
+                    ESP_LOGE(TAG, "esp_ota_write failed on initial chunk: %s", esp_err_to_name(err));
+                    free(buf);
+                    esp_ota_abort(ota_handle);
+                    httpd_resp_set_status(req, "500 Internal Server Error");
+                    httpd_resp_send(req, "OTA write failed", HTTPD_RESP_USE_STRLEN);
+                    return err;
+                }
+                received += initial_recv;
+            }
+
             // If content_length is 0, read until connection closes
+            int timeout_retries = 0;
             while (content_length == 0 || received < content_length) {
                 int recv_len = httpd_req_recv(req, buf, buf_size);
                 if (recv_len < 0) {
-                    if (recv_len == HTTPD_SOCK_ERR_TIMEOUT) {
+                    if (recv_len == HTTPD_SOCK_ERR_TIMEOUT && ++timeout_retries < HTTP_RECV_TIMEOUT_RETRIES) {
                         continue;
                     }
                     ESP_LOGE(TAG, "Receive failed");
@@ -807,7 +1135,8 @@ static esp_err_t update_post_handler(httpd_req_t *req)
                     httpd_resp_send(req, "Receive failed", HTTPD_RESP_USE_STRLEN);
                     return ESP_FAIL;
                 }
-                
+                timeout_retries = 0;
+
                 if (recv_len == 0) {
                     ESP_LOGI(TAG, "Connection closed, received %zu bytes total", received);
                     break;  // Connection closed
@@ -830,8 +1159,8 @@ static esp_err_t update_post_handler(httpd_req_t *req)
         
         free(buf);
         
-        ESP_LOGI(TAG, "Finished receiving data. Total binary bytes written: %zu (content_length was %zu, difference: %zu bytes of multipart overhead)", 
-                 received, content_length, content_length - received);
+        ESP_LOGI(TAG, "Finished receiving data. Total binary bytes written: %zu (content_length was %zu, difference: %zu bytes of multipart overhead)",
+                 received, content_length, (content_length > received) ? (content_length - received) : 0);
         
         // Verify the image size matches expected binary size
         // The binary file should be exactly the size we wrote
@@ -900,10 +1229,9 @@ static esp_err_t update_post_handler(httpd_req_t *req)
         }
         
         if (boot_partition == NULL) {
-            ESP_LOGE(TAG, "Could not find partition to set as boot (subtype %d, addr 0x%lx)", 
+            // The success response was already sent - just log and bail out
+            ESP_LOGE(TAG, "Could not find partition to set as boot (subtype %d, addr 0x%lx)",
                      partition_subtype, partition_address);
-            httpd_resp_set_status(req, "500 Internal Server Error");
-            httpd_resp_send(req, "Could not find boot partition", HTTPD_RESP_USE_STRLEN);
             return ESP_ERR_NOT_FOUND;
         }
         
@@ -922,12 +1250,19 @@ static esp_err_t update_post_handler(httpd_req_t *req)
         ESP_LOGI(TAG, "Rebooting now...");
         esp_restart();
     }
-    
-    // If we get here and no data was received, return error
-    ESP_LOGE(TAG, "No data received for firmware update");
-    httpd_resp_set_status(req, "400 Bad Request");
-    httpd_resp_send(req, "No data received", HTTPD_RESP_USE_STRLEN);
-    return ESP_ERR_INVALID_ARG;
+
+    return ESP_OK;  // Unreachable - esp_restart() does not return
+}
+
+/**
+ * @brief Register a URI handler, logging failures
+ */
+static void register_handler_logged(const httpd_uri_t *uri_conf)
+{
+    esp_err_t err = httpd_register_uri_handler(server_handle, uri_conf);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to register handler for %s: %s", uri_conf->uri, esp_err_to_name(err));
+    }
 }
 
 /**
@@ -949,9 +1284,15 @@ esp_err_t http_server_start(uint16_t port)
     
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port = port;
-    config.max_uri_handlers = 30;  // Increased to support all relay endpoints (1+1+1+6+6=15 minimum, with buffer)
+    config.max_uri_handlers = 40;  // Pages + update + wifi + debug + per-relay state and calibration endpoints
     config.max_open_sockets = 7;
     config.stack_size = 16384;  // Increased stack size for large firmware uploads (default is 4096, increased to 16KB)
+    // Robustness: during a multi-second OTA the single worker is busy, so the
+    // browser's background polling can exhaust the socket pool. Purge the oldest
+    // idle connection instead of wedging, and bound how long a recv/send may block.
+    config.lru_purge_enable = true;
+    config.recv_wait_timeout = 10;  // seconds
+    config.send_wait_timeout = 10;  // seconds
     
     ESP_LOGI(TAG, "Starting HTTP server on port %d with max_uri_handlers=%d", port, config.max_uri_handlers);
     
@@ -961,93 +1302,87 @@ esp_err_t http_server_start(uint16_t port)
         return start_err;
     }
     
-    if (server_handle != NULL) {
-        // Register handlers
-        // Main control page
-        httpd_uri_t control_page = {
-            .uri = "/",
-            .method = HTTP_GET,
-            .handler = control_page_handler,
-            .user_ctx = NULL
-        };
-        esp_err_t reg_err = httpd_register_uri_handler(server_handle, &control_page);
-        if (reg_err != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to register control page handler: %s", esp_err_to_name(reg_err));
-        }
-        
-        // Firmware update page
-        httpd_uri_t update_page = {
-            .uri = "/update",
-            .method = HTTP_GET,
-            .handler = update_page_handler,
-            .user_ctx = NULL
-        };
-        reg_err = httpd_register_uri_handler(server_handle, &update_page);
-        if (reg_err != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to register update page handler: %s", esp_err_to_name(reg_err));
-        }
-        
-        // Firmware upload endpoint
-        httpd_uri_t update_post = {
-            .uri = "/update",
-            .method = HTTP_POST,
-            .handler = update_post_handler,
-            .user_ctx = NULL
-        };
-        reg_err = httpd_register_uri_handler(server_handle, &update_post);
-        if (reg_err != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to register update POST handler: %s", esp_err_to_name(reg_err));
-        }
-        
-        // Relay API endpoints - register for each relay (1-6)
-        // Use static strings to ensure they persist
-        static const char relay_uri_1[] = "/api/relay/1";
-        static const char relay_uri_2[] = "/api/relay/2";
-        static const char relay_uri_3[] = "/api/relay/3";
-        static const char relay_uri_4[] = "/api/relay/4";
-        static const char relay_uri_5[] = "/api/relay/5";
-        static const char relay_uri_6[] = "/api/relay/6";
-        
-        const char *relay_uris[] = {
-            relay_uri_1, relay_uri_2, relay_uri_3,
-            relay_uri_4, relay_uri_5, relay_uri_6
-        };
-        
-        for (int i = 0; i < 6; i++) {
-            httpd_uri_t relay_get = {
-                .uri = relay_uris[i],
-                .method = HTTP_GET,
-                .handler = relay_get_handler,
-                .user_ctx = NULL
-            };
-            reg_err = httpd_register_uri_handler(server_handle, &relay_get);
-            if (reg_err != ESP_OK) {
-                ESP_LOGE(TAG, "Failed to register GET handler for %s: %s", relay_uris[i], esp_err_to_name(reg_err));
-            } else {
-                ESP_LOGI(TAG, "Registered GET handler for %s", relay_uris[i]);
-            }
-            
-            httpd_uri_t relay_post = {
-                .uri = relay_uris[i],
-                .method = HTTP_POST,
-                .handler = relay_post_handler,
-                .user_ctx = NULL
-            };
-            reg_err = httpd_register_uri_handler(server_handle, &relay_post);
-            if (reg_err != ESP_OK) {
-                ESP_LOGE(TAG, "Failed to register POST handler for %s: %s", relay_uris[i], esp_err_to_name(reg_err));
-            } else {
-                ESP_LOGI(TAG, "Registered POST handler for %s", relay_uris[i]);
-            }
-        }
-        
-        server_running = true;
-        ESP_LOGI(TAG, "HTTP server started successfully on port %d", port);
-        return ESP_OK;
-    } else {
+    if (server_handle == NULL) {
         ESP_LOGE(TAG, "Server handle is NULL after httpd_start");
         return ESP_FAIL;
     }
+
+    // Register all URI handlers from a single table
+    static const char *relay_uris[SMARTSOCKET_RELAY_COUNT] = {
+        "/api/relay/1", "/api/relay/2", "/api/relay/3",
+        "/api/relay/4", "/api/relay/5", "/api/relay/6"
+    };
+    static const char *calibrate_uris[SMARTSOCKET_RELAY_COUNT] = {
+        "/api/calibrate/1", "/api/calibrate/2", "/api/calibrate/3",
+        "/api/calibrate/4", "/api/calibrate/5", "/api/calibrate/6"
+    };
+
+    httpd_uri_t uri_conf = { .user_ctx = NULL };
+
+    // Static pages served from SPIFFS
+    uri_conf.uri = "/";
+    uri_conf.method = HTTP_GET;
+    uri_conf.handler = file_handler;
+    register_handler_logged(&uri_conf);
+
+    uri_conf.uri = "/update";
+    uri_conf.method = HTTP_GET;
+    uri_conf.handler = file_handler;
+    register_handler_logged(&uri_conf);
+
+    // Firmware upload endpoint
+    uri_conf.uri = "/update";
+    uri_conf.method = HTTP_POST;
+    uri_conf.handler = update_post_handler;
+    register_handler_logged(&uri_conf);
+
+    // Web page (SPIFFS) update endpoint
+    uri_conf.uri = "/update-web";
+    uri_conf.method = HTTP_POST;
+    uri_conf.handler = web_update_post_handler;
+    register_handler_logged(&uri_conf);
+
+    // WiFi configuration endpoints
+    uri_conf.uri = "/api/wifi";
+    uri_conf.method = HTTP_GET;
+    uri_conf.handler = wifi_get_handler;
+    register_handler_logged(&uri_conf);
+
+    uri_conf.uri = "/api/wifi";
+    uri_conf.method = HTTP_POST;
+    uri_conf.handler = wifi_post_handler;
+    register_handler_logged(&uri_conf);
+
+    // Diagnostics endpoint
+    uri_conf.uri = "/api/debug";
+    uri_conf.method = HTTP_GET;
+    uri_conf.handler = debug_get_handler;
+    register_handler_logged(&uri_conf);
+
+    // Relay state and calibration API endpoints
+    for (int i = 0; i < SMARTSOCKET_RELAY_COUNT; i++) {
+        uri_conf.uri = relay_uris[i];
+        uri_conf.method = HTTP_GET;
+        uri_conf.handler = relay_get_handler;
+        register_handler_logged(&uri_conf);
+
+        uri_conf.method = HTTP_POST;
+        uri_conf.handler = relay_post_handler;
+        register_handler_logged(&uri_conf);
+
+        uri_conf.uri = calibrate_uris[i];
+        uri_conf.method = HTTP_GET;
+        uri_conf.handler = calibrate_get_handler;
+        register_handler_logged(&uri_conf);
+
+        uri_conf.method = HTTP_POST;
+        uri_conf.handler = calibrate_post_handler;
+        register_handler_logged(&uri_conf);
+    }
+
+    server_running = true;
+    ESP_LOGI(TAG, "HTTP server started successfully on port %d", port);
+    return ESP_OK;
 }
 
 /**

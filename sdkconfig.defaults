@@ -1,0 +1,32 @@
+# SmartSocket project defaults.
+# These seed a fresh sdkconfig (which is gitignored so real WiFi credentials
+# never land in git). Set real WiFi credentials via `idf.py menuconfig`
+# (Example Configuration) after checkout; they are stored only in the local
+# untracked sdkconfig.
+#
+# Run `idf.py set-target esp32s3` once per checkout, then `idf.py build`.
+
+CONFIG_IDF_TARGET="esp32s3"
+
+# 16 MB flash
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="16MB"
+
+# Custom partition table: factory + ota_0 + ota_1 + spiffs
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+
+# OTA rollback: a freshly OTA'd app that crashes before app_main marks it valid
+# is reverted to the previous working image on next reboot (needs a USB flash of
+# the bootloader to take effect - OTA does not update the bootloader).
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+
+# LCD: ILI9341 panel with XPT2046 resistive touch
+CONFIG_EXAMPLE_LCD_CONTROLLER_ILI9341=y
+CONFIG_EXAMPLE_LCD_TOUCH_ENABLED=y
+CONFIG_EXAMPLE_LCD_TOUCH_CONTROLLER_XPT2046=y
+
+# WiFi / OTA - placeholders, override locally via menuconfig
+CONFIG_SMARTSOCKET_WIFI_SSID="SSID"
+CONFIG_SMARTSOCKET_WIFI_PASSWORD="PASSWORD"
+CONFIG_SMARTSOCKET_OTA_HOSTNAME="smartsocket.local"

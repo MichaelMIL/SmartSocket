@@ -53,10 +53,31 @@ esp_err_t wifi_ota_update_from_host(const char *hostname, const char *path, uint
 
 /**
  * @brief Get WiFi connection status
- * 
+ *
  * @return true if connected, false otherwise
  */
 bool wifi_ota_is_connected(void);
+
+/**
+ * @brief Check whether the device is running the provisioning access point
+ *
+ * The AP is started automatically when connecting to the configured WiFi fails.
+ *
+ * @return true if in AP (provisioning) mode
+ */
+bool wifi_ota_is_ap_mode(void);
+
+/**
+ * @brief Persist WiFi credentials to NVS
+ *
+ * Saved credentials take precedence over the compiled-in defaults on the
+ * next boot. Password may be empty for open networks.
+ *
+ * @param ssid WiFi SSID (must be non-empty)
+ * @param password WiFi password (may be NULL or empty)
+ * @return esp_err_t ESP_OK on success
+ */
+esp_err_t wifi_ota_save_credentials(const char *ssid, const char *password);
 
 /**
  * @brief Get current IP address

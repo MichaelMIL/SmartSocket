@@ -22,61 +22,34 @@ static const char *DEFAULT_TAG = "master_btn";
  */
 static void master_button_cb(lv_event_t *e)
 {
-    lv_event_code_t code = lv_event_get_code(e);
-    ESP_LOGI(DEFAULT_TAG, "Master button clicked");
-    if (code != LV_EVENT_CLICKED) {
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED) {
         return;  // Only handle click events
     }
-    
-    // Get the master button UI object from user data
-    master_button_ui_t *master = (master_button_ui_t *)lv_event_get_user_data(e);
 
+    master_button_ui_t *master = (master_button_ui_t *)lv_event_get_user_data(e);
     if (master == NULL) {
         ESP_LOGE(DEFAULT_TAG, "Master button callback received NULL master object");
         return;
     }
 
-    // Validate master object structure
-    if (master->button == NULL) {
-        const char *tag = (master->tag != NULL) ? master->tag : DEFAULT_TAG;
-        ESP_LOGE(tag, "Master button object has NULL button pointer");
-        return;
-    }
-    
     // Master button clicked - turn OFF all controlled relays that are ON
-    bool any_changed = false;
-    // Validate controlled_relays array before iterating
     if (master->controlled_relays == NULL || master->num_controlled_relays == 0) {
-        const char *tag = (master->tag != NULL) ? master->tag : DEFAULT_TAG;
-        ESP_LOGW(tag, "Master button: controlled_relays not configured");
+        ESP_LOGW(master->tag, "Master button: controlled_relays not configured");
     } else {
-        ESP_LOGI(DEFAULT_TAG, "Controlled relays: %d", master->num_controlled_relays);
+        uint8_t turned_off = 0;
         for (uint8_t i = 0; i < master->num_controlled_relays; i++) {
             relay_control_ui_t *relay = master->controlled_relays[i];
-            // Step-by-step validation to avoid crashes
-            if (relay == NULL) {
-                continue;  // Skip NULL entries
-            }
-            
-            // Check if relay object is valid by checking button pointer
-            if (relay->button == NULL) {
-                ESP_LOGI(DEFAULT_TAG, "Relay button: %p", relay->button);
-                const char *tag = (master->tag != NULL) ? master->tag : DEFAULT_TAG;
-                ESP_LOGW(tag, "Master button: Skipping invalid relay object at index %d", i);
-                continue;  // Invalid relay object - skip it
-            }
-
-            // Use safe API to get state instead of direct access
-            if (relay_control_ui_get_state(relay)) {
-                // Turn off the relay using safe API
+            if (relay != NULL && relay_control_ui_get_state(relay)) {
                 relay_control_ui_set_state(relay, false);
-                any_changed = true;
+                turned_off++;
             }
         }
+        ESP_LOGI(master->tag, "Master button clicked, turned OFF %u of %u relays",
+                 turned_off, master->num_controlled_relays);
     }
-        // Update master button appearance after turning off relays
-        master_button_ui_update_appearance(master);
 
+    // Update master button appearance after turning off relays
+    master_button_ui_update_appearance(master);
 }
 
 /**
